@@ -15,3 +15,7 @@ build/
 coverage.xml
 htmlcov/
 dist/
+
+# Windows shell accidents: `$env:VAR = ...` and stray redirects
+$env
+python

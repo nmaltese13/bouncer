@@ -30,10 +30,11 @@ jobs:
       - name: Install
         run: python -m pip install --upgrade pip && python -m pip install -e ".[dev]"
 
-      # The floor is what keeps the README's coverage badge honest: it cannot
-      # quietly rot as code is added without tests.
+      # The floor is set to the number on the README badge, not below it. A
+      # static badge is only honest if CI fails the moment reality drops under
+      # what it claims -- otherwise it is decoration that rots silently.
       - name: Tests
-        run: python -m pytest --cov=bouncer --cov-report=term --cov-fail-under=85
+        run: python -m pytest --cov=bouncer --cov-report=term --cov-fail-under=89
 
       - name: Types
         run: python -m mypy

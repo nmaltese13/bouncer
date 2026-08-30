@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/nmaltese13/bouncer/actions/workflows/ci.yml/badge.svg)](https://github.com/nmaltese13/bouncer/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/agent-bouncer)](https://pypi.org/project/agent-bouncer/)
-[![Coverage 89%](https://img.shields.io/badge/coverage-89%25-brightgreen)](#development)
+[![Coverage 89%](https://img.shields.io/badge/coverage-89%25-brightgreen)](https://github.com/nmaltese13/bouncer/actions/workflows/ci.yml)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Checked with mypy](https://img.shields.io/badge/mypy-strict-blue)](http://mypy-lang.org/)
@@ -507,9 +507,13 @@ factor-of-a-million error.
 
 ```bash
 uv venv --python 3.12 && uv pip install -e ".[dev]"
-.venv/bin/python -m pytest          # 245 tests, ~10s
+.venv/bin/python -m pytest          # 278 tests, ~13s
 .venv/bin/python -m mypy            # strict, clean
 ```
+
+The coverage badge is a static number, not a live service reading — but CI runs
+`--cov-fail-under=89`, so the build fails the moment coverage drops below what
+the badge claims. It is an enforced floor rather than decoration.
 
 On Windows the interpreter is `.venv\Scripts\python.exe`, and one test skips:
 key file permissions are POSIX mode bits, which Windows does not honour. The
