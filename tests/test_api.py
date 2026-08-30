@@ -331,3 +331,80 @@ def test_blocking_authorize_times_out_into_a_deny(client: TestClient) -> None:
     )
     assert response.status_code == 403
     assert response.json()["decision"]["reason_code"] == "APPROVAL_TIMEOUT"
+
+
+# ---------------------------------------------------------------------------
+# POST /approvals/{id}/resolve
+# ---------------------------------------------------------------------------
+
+
+def queue_an_approval(client: TestClient) -> str:
+    status, body = authorize(
+        client, agent_id="research-bot", merchant="api.example.com", amount="75.00"
+    )
+    assert status == 202
+    pending_id = body["pending_id"]
+    assert isinstance(pending_id, str)
+    return pending_id
+
+
+def test_resolve_grants_with_the_required_role(client: TestClient) -> None:
+    item_id = queue_an_approval(client)
+    response = client.post(
+        f"/approvals/{item_id}/resolve", json={"role": "finance", "approve": True}
+    )
+    assert response.status_code == 200
+    assert response.json()["decision"]["reason_code"] == "APPROVAL_GRANTED"
+    assert response.json()["mandate"]
+
+
+def test_resolve_refuses_the_wrong_role(client: TestClient) -> None:
+    item_id = queue_an_approval(client)
+    response = client.post(
+        f"/approvals/{item_id}/resolve", json={"role": "engineering", "approve": True}
+    )
+    assert response.status_code == 403
+    assert "requires role" in response.json()["error"]
+
+
+def test_resolve_is_once_only(client: TestClient) -> None:
+    item_id = queue_an_approval(client)
+    assert client.post(
+        f"/approvals/{item_id}/resolve", json={"role": "finance", "approve": True}
+    ).status_code == 200
+    assert client.post(
+        f"/approvals/{item_id}/resolve", json={"role": "finance", "approve": True}
+    ).status_code == 403
+
+
+def test_resolve_denying_is_symmetric_with_approving(client: TestClient) -> None:
+    """Vetoing must not be easier than approving; both take the same check."""
+    item_id = queue_an_approval(client)
+    wrong = client.post(
+        f"/approvals/{item_id}/resolve", json={"role": "engineering", "approve": False}
+    )
+    assert wrong.status_code == 403
+
+    right = client.post(
+        f"/approvals/{item_id}/resolve", json={"role": "finance", "approve": False}
+    )
+    assert right.status_code == 403
+    assert right.json()["decision"]["reason_code"] == "APPROVAL_DENIED"
+    assert right.json()["mandate"] is None
+
+
+def test_resolve_unknown_id_is_404(client: TestClient) -> None:
+    response = client.post(
+        "/approvals/nosuchitem/resolve", json={"role": "finance", "approve": True}
+    )
+    assert response.status_code == 404
+
+
+def test_resolve_rejects_unknown_fields(client: TestClient) -> None:
+    """extra='forbid' -- a misspelled field must not read as a default."""
+    item_id = queue_an_approval(client)
+    response = client.post(
+        f"/approvals/{item_id}/resolve",
+        json={"role": "finance", "aprove": True},
+    )
+    assert response.status_code == 422

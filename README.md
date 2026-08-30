@@ -392,7 +392,19 @@ curl -X POST localhost:8080/authorize \
 
 `200` allowed (with a mandate), `403` denied, `202` awaiting a human. Add
 `?wait=true` to long-poll for an approval; **the wait times out into a deny.**
-`http://127.0.0.1:8080/docs` is an interactive console for the same endpoints.
+
+Resolve a queued approval over the same API:
+
+```bash
+curl -X POST localhost:8080/approvals/<id>/resolve   -H 'content-type: application/json'   -d '{"role":"finance","approve":true}'
+```
+
+`403` for the wrong role or an item already resolved, `404` for an unknown id.
+**This endpoint authenticates nobody** — `role` is an assertion, and unlike the
+CLI it needs only reachability rather than shell access, so anyone who can open
+a socket to this port can approve any queued payment. Bind to loopback.
+
+`http://127.0.0.1:8080/docs` is an interactive console for all of it.
 
 ### As a proxy — plaintext HTTP only
 

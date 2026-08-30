@@ -606,3 +606,67 @@ def test_tunnel_denylist_beats_allowlist() -> None:
 def test_tunnel_without_policy_denies() -> None:
     decision = evaluate_tunnel("api.example.com", None, agent_id="research-bot", now=NOW)
     assert decision.outcome is Outcome.DENY
+
+
+# ---------------------------------------------------------------------------
+# a policy must mean exactly what is written, or refuse to load
+# ---------------------------------------------------------------------------
+
+
+def test_agent_keys_colliding_after_strip_are_a_load_error() -> None:
+    """'bot' and 'bot ' both normalize to 'bot'.
+
+    A plain dict kept whichever came last, and in practice that was as often
+    the looser rule as the stricter one -- so an operator could add a strict
+    entry, have it silently discarded, and be told nothing.
+    """
+    with pytest.raises(PolicyError, match="same agent"):
+        policy_from(
+            'version: 1\ncurrency: USD\nagents:\n'
+            '  "bot":\n    per_transaction_cap: 1.00\n'
+            '  "bot ":\n    per_transaction_cap: 9999.00\n'
+        )
+
+
+def test_a_duplicate_yaml_key_is_a_load_error() -> None:
+    """YAML allows duplicates and PyYAML keeps the last one silently."""
+    with pytest.raises(PolicyError, match="duplicate key"):
+        policy_from(
+            "version: 1\ncurrency: USD\nagents:\n"
+            "  bot:\n    per_transaction_cap: 1.00\n"
+            "  bot:\n    per_transaction_cap: 9999.00\n"
+        )
+
+
+def test_a_duplicate_rule_key_is_a_load_error() -> None:
+    with pytest.raises(PolicyError, match="duplicate key"):
+        policy_from(
+            "version: 1\ncurrency: USD\nagents:\n  bot:\n"
+            "    per_transaction_cap: 1.00\n    per_transaction_cap: 9999.00\n"
+        )
+
+
+@pytest.mark.parametrize("window", ["999999999999w", "99999999999999999999d", "4000d"])
+def test_an_unusable_window_denies_instead_of_crashing(window: str) -> None:
+    """parse_duration overflowed timedelta and raised OverflowError.
+
+    That is not a ValueError, so pydantic did not convert it, PolicyError was
+    never raised, and the exception escaped LocalFileSource.load() -- which is
+    documented as never raising. The decision path crashed instead of denying.
+    """
+    with pytest.raises(PolicyError):
+        policy_from(
+            "version: 1\ncurrency: USD\nagents:\n  bot:\n"
+            "    per_transaction_cap: 10.00\n    rolling_windows:\n"
+            f'      - amount: 5.00\n        window: "{window}"\n'
+        )
+
+
+def test_a_realistic_long_window_still_loads() -> None:
+    """The ceiling must not reject an actually plausible budgeting period."""
+    policy = policy_from(
+        "version: 1\ncurrency: USD\nagents:\n  bot:\n"
+        "    per_transaction_cap: 10.00\n    rolling_windows:\n"
+        "      - amount: 5.00\n        window: 365d\n"
+    )
+    assert policy.agents["bot"].rolling_windows[0].duration == timedelta(days=365)

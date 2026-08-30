@@ -26,7 +26,7 @@ from .approvals import ApprovalQueue
 from .audit import AuditLog
 from .config import BouncerConfig
 from .enforcement import AuthorizationResult, Enforcer
-from .errors import MandateError, UnparseableIntent
+from .errors import MandateError, RoleMismatch, UnknownApproval, UnparseableIntent
 from .keys import OperatorKey
 from .mandate import NonceStore, verify_mandate
 from .models import Outcome, PaymentIntent
@@ -68,6 +68,16 @@ class VerifyMandateRequest(BaseModel):
     amount: str | None = None
     agent_id: str | None = None
     consume: bool = True
+
+
+class ResolveRequest(BaseModel):
+    """An approver acting on a queued item."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    role: str = Field(min_length=1, max_length=64)
+    approve: bool
+    note: str | None = Field(default=None, max_length=512)
 
 
 def build_enforcer(config: BouncerConfig) -> Enforcer:
@@ -249,9 +259,43 @@ def create_app(config: BouncerConfig | None = None, *, enforcer: Enforcer | None
 
     @app.get("/pending")
     def pending(role: str | None = None) -> dict[str, Any]:
-        """List approvals awaiting a human. Resolution happens via the CLI."""
+        """List approvals awaiting a human."""
         items = engine.approvals.list(role=role)
         return {"count": len(items), "items": [item.to_dict() for item in items]}
+
+    @app.post("/approvals/{item_id}/resolve")
+    async def resolve_approval(item_id: str, request: ResolveRequest) -> Response:
+        """Approve or deny a queued item.
+
+        Threat model: **this endpoint authenticates nobody**, and it is the most
+        consequential one in the service for that reason. ``role`` is an
+        assertion by the caller exactly as ``--role`` is on the CLI, but where
+        the CLI at least requires shell access on the host, this requires only
+        reachability. Anyone who can open a socket to this port can approve any
+        queued payment.
+
+        That makes the loopback binding load-bearing rather than advisory. Do
+        not expose this service on a routable interface.
+
+        The grant is still re-evaluated against current policy, so an approval
+        cannot authorize something the rules now forbid — see
+        ``Enforcer._finalize_locked``.
+        """
+        try:
+            result = await asyncio.to_thread(
+                engine.resolve,
+                item_id,
+                role=request.role,
+                approve=request.approve,
+                note=request.note,
+            )
+        except UnknownApproval as exc:
+            return JSONResponse(status_code=404, content={"error": str(exc)})
+        except RoleMismatch as exc:
+            # Wrong role, or already resolved. Both are refusals to act, not
+            # server faults, and both must read as such to a caller.
+            return JSONResponse(status_code=403, content={"error": str(exc)})
+        return _respond(result)
 
     @app.get("/audit/verify")
     def audit_verify(expect_head: str | None = None) -> JSONResponse:

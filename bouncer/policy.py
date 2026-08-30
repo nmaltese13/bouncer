@@ -20,7 +20,7 @@ from datetime import datetime, time, timedelta
 from decimal import Decimal
 from enum import Enum
 from pathlib import Path
-from typing import Self
+from typing import Any, Self
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
@@ -56,8 +56,22 @@ _DURATION_UNITS: dict[str, timedelta] = {
 }
 
 
+#: The longest rolling window a policy may declare. A ceiling is needed for two
+#: reasons: ``timedelta`` overflows on absurd multipliers, and the value also
+#: sets how far back spend history is read on every decision. Ten years is far
+#: past any real budgeting period, so anything beyond it is a typo.
+MAX_WINDOW = timedelta(days=3660)
+
+
 def parse_duration(text: str) -> timedelta:
-    """Parse a compact duration such as ``30d``, ``24h``, ``90m``."""
+    """Parse a compact duration such as ``30d``, ``24h``, ``90m``.
+
+    Raises ``ValueError`` on anything unusable. It must never raise anything
+    else: pydantic converts ``ValueError`` into a validation error, which
+    becomes a :class:`PolicyError` and therefore a deny. An exception of any
+    other type escapes the policy source entirely and crashes the decision path
+    instead of failing closed.
+    """
     match = _DURATION_RE.match(text)
     if match is None:
         raise ValueError(
@@ -66,7 +80,16 @@ def parse_duration(text: str) -> timedelta:
     count = int(match.group(1))
     if count <= 0:
         raise ValueError(f"duration must be positive: {text!r}")
-    return _DURATION_UNITS[match.group(2).lower()] * count
+    try:
+        duration = _DURATION_UNITS[match.group(2).lower()] * count
+    except OverflowError as exc:
+        raise ValueError(f"duration {text!r} is too large to represent") from exc
+    if duration > MAX_WINDOW:
+        raise ValueError(
+            f"duration {text!r} exceeds the {MAX_WINDOW.days}-day maximum; "
+            "a window that long is a typo, not a budget"
+        )
+    return duration
 
 
 class _Strict(BaseModel):
@@ -297,11 +320,28 @@ class Policy(_Strict):
     @field_validator("agents")
     @classmethod
     def _normalize_agents(cls, value: dict[str, RuleSet]) -> dict[str, RuleSet]:
+        """Strip agent keys, and refuse two that collide once stripped.
+
+        Threat model: ``"bot"`` and ``"bot "`` both normalize to ``bot``, and a
+        plain dict would keep whichever came last. In practice the survivor was
+        the *looser* rule as often as not, so an operator could add a strict
+        entry, have it silently discarded, and be told nothing. A policy that
+        quietly means something other than what is written is the failure this
+        schema exists to prevent, so a collision is a load error.
+        """
         out: dict[str, RuleSet] = {}
+        seen: dict[str, str] = {}
         for key, rules in value.items():
             agent = key.strip()
             if not agent:
                 raise ValueError("agent id must not be blank")
+            if agent in seen:
+                raise ValueError(
+                    f"agents {seen[agent]!r} and {key!r} are the same agent "
+                    f"({agent!r}) once surrounding whitespace is stripped; one "
+                    "would silently override the other"
+                )
+            seen[agent] = key
             out[agent] = rules
         return out
 
@@ -357,7 +397,29 @@ class _DecimalSafeLoader(yaml.SafeLoader):
     not 100.10, and a cap that is a hair above or below the number the operator
     wrote is a policy the operator did not author. Parsing straight to Decimal
     keeps the written value exact.
+
+    It also rejects duplicate mapping keys. YAML permits them and PyYAML keeps
+    the last silently, so a policy naming an agent or a rule twice would enforce
+    only one of the two with no indication which. Written twice, meant once.
     """
+
+    def construct_mapping(
+        self, node: yaml.MappingNode, deep: bool = False
+    ) -> dict[Any, Any]:
+        seen: set[Any] = set()
+        for key_node, _ in node.value:
+            key = self.construct_object(key_node, deep=deep)
+            if key in seen:
+                raise yaml.constructor.ConstructorError(
+                    None,
+                    None,
+                    f"duplicate key {key!r}; the second would silently replace "
+                    "the first",
+                    key_node.start_mark,
+                )
+            seen.add(key)
+        mapping: dict[Any, Any] = super().construct_mapping(node, deep=deep)
+        return mapping
 
 
 def _construct_decimal(loader: yaml.SafeLoader, node: yaml.Node) -> Decimal:
