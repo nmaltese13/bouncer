@@ -476,6 +476,39 @@ append-only audit log. Run it from cron if you are issuing a lot of mandates.
 
 ---
 
+## Trying a policy change before you make it
+
+Tightening a cap is easy. Knowing it would have blocked six legitimate purchases
+last month is the part that stops you doing it blind.
+
+```bash
+bouncer simulate tighter-policy.yaml
+```
+
+It replays every payment already in the audit log against the candidate policy
+and reports what would change:
+
+```
+replayed 47 payment(s): 6 newly blocked, 1 newly allowed, 40 unchanged
+
+would now be BLOCKED (412.00 total):
+  2026-08-04 11:22       75.00 USD to api.vendor.example
+      OVER_PER_TXN_CAP: 75.00 USD exceeds the per-transaction cap of 50.00 USD
+
+Nothing was written. This was a simulation.
+```
+
+**It writes nothing** — no audit rows, no mandates, no queue entries. Scope it
+with `--agent`, or use `--json` to feed the result to something else.
+
+One detail that makes the answer trustworthy: the replay keeps its *own* running
+spend total, built from the payments the candidate policy would have allowed. If
+the new rules block the third payment, the fourth is judged against a total that
+never included it. Replaying against the recorded history instead would report
+three casualties where the true answer is one, and would mis-answer every
+rolling-window rule — the rule most likely to be under review in the first
+place.
+
 ## Approvals
 
 ```bash

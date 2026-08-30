@@ -381,6 +381,87 @@ def cmd_deny(args: argparse.Namespace, out: TextIO) -> int:
     return _resolve(args, out, approve=False)
 
 
+def cmd_simulate(args: argparse.Namespace, out: TextIO) -> int:
+    """Replay a candidate policy against the decisions already recorded.
+
+    Writes nothing. It answers what a rule change would have done to traffic
+    already seen, so a cap can be tightened knowing what it would have cost.
+    """
+    from .simulate import replay
+
+    config = _config(args)
+    assert config.key_path is not None and config.db_path is not None
+    try:
+        candidate = Policy.from_yaml(Path(args.path).read_text(encoding="utf-8"))
+    except (PolicyError, OSError) as exc:
+        out.write(f"INVALID: {exc}\n")
+        return EXIT_ERROR
+
+    log = AuditLog(config.db_path, OperatorKey.load(config.key_path))
+    result = replay(log, candidate, agent_id=args.agent)
+
+    if args.json:
+        _emit(
+            {
+                "replayed": len(result.attempts),
+                "newly_blocked": len(result.newly_blocked),
+                "newly_allowed": len(result.newly_allowed),
+                "unchanged": len(result.unchanged),
+                "skipped": result.skipped,
+                "blocked_value": str(result.blocked_value),
+                "released_value": str(result.released_value),
+                "changes": [
+                    {
+                        "at": item.at.isoformat(),
+                        "agent_id": item.intent.agent_id,
+                        "merchant": item.intent.merchant,
+                        "amount": str(item.intent.amount),
+                        "was": item.recorded.value,
+                        "would_be": item.outcome.value,
+                        "reason_code": item.decision.reason_code.value,
+                        "reason": item.decision.reason,
+                        "rule": item.decision.rule,
+                    }
+                    for item in result.newly_blocked + result.newly_allowed
+                ],
+            },
+            out,
+            as_json=True,
+            human="",
+        )
+        return EXIT_OK
+
+    out.write(f"candidate policy: {args.path}\n")
+    out.write(f"policy hash:      {candidate.policy_hash}\n\n")
+    out.write(result.describe() + "\n")
+    if result.skipped:
+        out.write(f"({result.skipped} row(s) carried no payment to re-judge)\n")
+
+    if result.newly_blocked:
+        out.write(f"\nwould now be BLOCKED ({result.blocked_value} total):\n")
+        for item in result.newly_blocked:
+            out.write(
+                f"  {item.at:%Y-%m-%d %H:%M}  {item.intent.amount:>10} "
+                f"{item.intent.currency} to {item.intent.merchant}\n"
+                f"      {item.decision.reason_code.value}: {item.decision.reason}\n"
+            )
+
+    if result.newly_allowed:
+        out.write(f"\nwould now be ALLOWED ({result.released_value} total):\n")
+        for item in result.newly_allowed:
+            out.write(
+                f"  {item.at:%Y-%m-%d %H:%M}  {item.intent.amount:>10} "
+                f"{item.intent.currency} to {item.intent.merchant}\n"
+                f"      was {item.recorded.value}\n"
+            )
+
+    if not result.newly_blocked and not result.newly_allowed and result.attempts:
+        out.write("\nnothing would change.\n")
+
+    out.write("\nNothing was written. This was a simulation.\n")
+    return EXIT_OK
+
+
 def cmd_demo(args: argparse.Namespace, out: TextIO) -> int:
     """Run the bundled demonstration.
 
@@ -521,6 +602,15 @@ def build_parser() -> argparse.ArgumentParser:
     deny.add_argument("--note")
     deny.add_argument("--json", action="store_true")
     deny.set_defaults(handler=cmd_deny)
+
+    simulate = subparsers.add_parser(
+        "simulate",
+        help="replay a candidate policy against the recorded log; writes nothing",
+    )
+    simulate.add_argument("path", type=Path, help="the candidate policy YAML")
+    simulate.add_argument("--agent", help="only replay this agent's payments")
+    simulate.add_argument("--json", action="store_true")
+    simulate.set_defaults(handler=cmd_simulate)
 
     demo = subparsers.add_parser(
         "demo", help="watch six purchases judged, then the audit chain checked"

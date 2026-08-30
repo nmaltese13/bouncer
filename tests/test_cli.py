@@ -333,3 +333,74 @@ def test_demo_command_does_not_touch_the_operator_home(
     assert sorted(p.name for p in home.iterdir()) == before
     after = (home / "bouncer.db").stat().st_size if (home / "bouncer.db").exists() else 0
     assert after == audit_rows_before
+
+
+# ---------------------------------------------------------------------------
+# `bouncer simulate`
+# ---------------------------------------------------------------------------
+
+
+def test_simulate_reports_what_a_tighter_cap_would_have_blocked(
+    home: Path, tmp_path: Path
+) -> None:
+    bootstrap(home)
+    for amount in ("5.00", "15.00", "8.00"):
+        run(home, "check", "--agent", "research-bot",
+            "--merchant", "api.openai.com", "--amount", amount)
+
+    candidate = tmp_path / "tighter.yaml"
+    candidate.write_text(
+        "version: 1\ncurrency: USD\nagents:\n  research-bot:\n"
+        "    per_transaction_cap: 10.00\n",
+        encoding="utf-8",
+    )
+    code, output = run(home, "simulate", str(candidate))
+    assert code == EXIT_OK
+    assert "would now be BLOCKED" in output
+    assert "OVER_PER_TXN_CAP" in output
+    assert "Nothing was written" in output
+
+
+def test_simulate_writes_nothing_to_the_log(home: Path, tmp_path: Path) -> None:
+    bootstrap(home)
+    run(home, "check", "--agent", "research-bot",
+        "--merchant", "api.openai.com", "--amount", "5.00")
+    _, before = run(home, "verify", "--json")
+
+    candidate = tmp_path / "tighter.yaml"
+    candidate.write_text(
+        "version: 1\ncurrency: USD\nagents:\n  research-bot:\n"
+        "    per_transaction_cap: 1.00\n",
+        encoding="utf-8",
+    )
+    run(home, "simulate", str(candidate))
+
+    _, after = run(home, "verify", "--json")
+    assert json.loads(before) == json.loads(after), "the chain must be untouched"
+
+
+def test_simulate_rejects_an_invalid_candidate(home: Path, tmp_path: Path) -> None:
+    bootstrap(home)
+    bad = tmp_path / "bad.yaml"
+    bad.write_text("this is not: [valid yaml\n", encoding="utf-8")
+    code, output = run(home, "simulate", str(bad))
+    assert code == EXIT_ERROR
+    assert "INVALID" in output
+
+
+def test_simulate_json_output_is_machine_readable(home: Path, tmp_path: Path) -> None:
+    bootstrap(home)
+    run(home, "check", "--agent", "research-bot",
+        "--merchant", "api.openai.com", "--amount", "5.00")
+    candidate = tmp_path / "c.yaml"
+    candidate.write_text(
+        "version: 1\ncurrency: USD\nagents:\n  research-bot:\n"
+        "    per_transaction_cap: 1.00\n",
+        encoding="utf-8",
+    )
+    code, output = run(home, "simulate", str(candidate), "--json")
+    assert code == EXIT_OK
+    report = json.loads(output)
+    assert report["newly_blocked"] == 1
+    assert report["changes"][0]["would_be"] == "DENY"
+    assert report["changes"][0]["was"] == "ALLOW"
