@@ -25,7 +25,7 @@ from .models import Decision, Outcome, PaymentIntent, ReasonCode, SpendRecord
 from .policy import Policy, RuleSet
 from .sources import LoadedPolicy, LocalFileSource, PolicySource
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 
 __all__ = [
     "ApprovalRequired",

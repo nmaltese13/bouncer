@@ -2,8 +2,9 @@
 
 Assessment of the repository as it stands against the seven-item v0.1 scope.
 
-**Verified state:** 247 tests (246 pass, 1 skipped on Windows), `mypy --strict`
-clean across 37 source files, CLI and API both run.
+**Verified state:** 322 tests (321 pass, 1 skipped on Windows), 90% coverage
+enforced in CI, `mypy --strict` clean across 46 source files, CLI and API both
+run.
 
 ---
 
@@ -23,9 +24,16 @@ part. What has changed:
 | `LocalFileSource` cached on `(mtime, size)` | **Fixed.** Keyed on a content hash, so a same-size edit with a preserved timestamp can no longer leave a stale, looser policy in force. |
 | §3.7 — proxy blocked the asyncio event loop | **Fixed.** `_authorize` and both tunnel decisions now run via `asyncio.to_thread`. |
 | §3.8 — dead assignment in `cmd_export` | **Fixed.** |
+| §3.5 — `POST /approvals/{id}/resolve` missing | **Built.** 403 on the wrong role or a second resolve, 404 on an unknown id. |
+| Item 7 — toy agent example | **Built.** `examples/agent.py` spends through a $50 budget until it is stopped. |
+| Agent keys colliding after `strip()`, and duplicate YAML keys | **Fixed.** Both silently kept the looser rule; both are now load errors. |
+| `parse_duration` raised `OverflowError` out of the policy source | **Fixed.** Durations are bounded, and an unusable one denies rather than crashing the decision path. |
+| Key material was pinned to an in-process `OperatorKey` | **Widened.** Audit and mandates depend on a `Signer` protocol; `ExternalSigner` puts the key behind a TPM, HSM or token. |
+| No way to try a policy before adopting it | **Added.** `bouncer simulate` replays a candidate against the recorded log and writes nothing. |
 
-Still open: the four decisions in §7, item 7 (the toy agent), and item 1's
-`AuditEntry` model. §5's scope deletions are untouched pending §7.
+Still open: the four decisions in §7, and item 1's `AuditEntry` model, which
+is a SQLAlchemy row rather than a pydantic schema. §5's scope deletions are
+untouched pending §7.
 
 ---
 
@@ -55,9 +63,9 @@ that change the shape of the codebase in section 7 rather than guessing.
 | 2 | Pure `evaluate()`, fully unit-tested | Done, exceeds spec |
 | 3 | Audit log: append-only JSONL, hash-chained, ed25519, `bouncer verify` | Works, wrong storage medium |
 | 4 | Approval queue in SQLite, by approver_role | Works, role unconstrained |
-| 5 | FastAPI: `POST /authorize`, `POST /approvals/{id}/resolve` | Half - resolve endpoint absent |
+| 5 | FastAPI: `POST /authorize`, `POST /approvals/{id}/resolve` | Done - both endpoints exist |
 | 6 | Client lib: context manager wrapping an agent's spend call | Done - see "Resolved" above |
-| 7 | Example: toy agent, $50 budget, overspends, blocked | Adjacent thing exists |
+| 7 | Example: toy agent, $50 budget, overspends, blocked | Done - `examples/agent.py` |
 
 ---
 

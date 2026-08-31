@@ -2,7 +2,7 @@
 # The distribution name is `agent-bouncer` because `bouncer` on PyPI is an
 # unrelated 2014 authorization library. The import package stays `bouncer`.
 name = "agent-bouncer"
-version = "0.1.1"
+version = "0.1.2"
 description = "A policy enforcement point for agent spending: blocks transactions that violate a declarative policy and writes a tamper-evident, signed audit log of every decision."
 readme = "README.md"
 license = { text = "MIT" }

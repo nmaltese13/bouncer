@@ -476,6 +476,32 @@ append-only audit log. Run it from cron if you are issuing a lot of mandates.
 
 ---
 
+## Keeping the signing key out of the process
+
+By default the operator key sits in `~/.bouncer/operator.pem` and this process
+signs with it. That means **the process that writes the audit log is the process
+that signs it** — a signature proves a row came from something holding the key,
+not that the row is honest.
+
+To put the key behind a TPM, an HSM or a hardware token instead:
+
+```bash
+export BOUNCER_SIGNER_COMMAND="/usr/local/bin/sign-with-yubikey"
+export BOUNCER_PUBLIC_KEY="$HOME/.bouncer/operator.pub"
+bouncer serve
+```
+
+The command reads the message to sign on stdin and writes a detached Ed25519
+signature to stdout, as 64 raw bytes or base64 — small enough to wrap
+`pkcs11-tool`, a TPM helper, or an agent on a socket. Every signature is
+verified before it is recorded, so a broken signer fails loudly on the first
+attempt rather than filling the log with rows that never verify.
+
+This narrows the exposure; it does not close it. An attacker with code execution
+can still use the signer as an oracle while they keep that access — they just
+cannot take the key with them. [SECURITY.md](SECURITY.md#key-management-the-writer-holds-the-signing-key)
+has the full picture.
+
 ## Trying a policy change before you make it
 
 Tightening a cap is easy. Knowing it would have blocked six legitimate purchases
@@ -552,7 +578,7 @@ factor-of-a-million error.
 
 ```bash
 uv venv --python 3.12 && uv pip install -e ".[dev]"
-.venv/bin/python -m pytest          # 278 tests, ~13s
+.venv/bin/python -m pytest          # 322 tests, ~9s
 .venv/bin/python -m mypy            # strict, clean
 ```
 
