@@ -50,7 +50,7 @@ from .errors import (
     MandateScopeViolation,
     MandateSignatureInvalid,
 )
-from .keys import OperatorKey, VerifyKey
+from .keys import Signer, VerifyKey
 from .models import Money, PaymentIntent, _to_decimal
 
 __all__ = [
@@ -114,7 +114,7 @@ def _b64url_decode(text: str) -> bytes:
 
 def issue_mandate(
     intent: PaymentIntent,
-    key: OperatorKey,
+    key: Signer,
     *,
     policy_hash: str,
     now: datetime,
@@ -152,7 +152,7 @@ def issue_mandate(
 
 def verify_mandate(
     token: str,
-    verify_key: VerifyKey | OperatorKey,
+    verify_key: VerifyKey | Signer,
     *,
     now: datetime,
     nonce_store: NonceStore | None = None,
@@ -186,7 +186,7 @@ def verify_mandate(
     if now.tzinfo is None:
         raise ValueError("`now` must be timezone-aware")
 
-    key = verify_key.verify_key if isinstance(verify_key, OperatorKey) else verify_key
+    key = verify_key.verify_key if isinstance(verify_key, Signer) else verify_key
 
     parts = token.strip().split(".")
     if len(parts) != 2:

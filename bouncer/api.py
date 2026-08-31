@@ -27,7 +27,7 @@ from .audit import AuditLog
 from .config import BouncerConfig
 from .enforcement import AuthorizationResult, Enforcer
 from .errors import MandateError, RoleMismatch, UnknownApproval, UnparseableIntent
-from .keys import OperatorKey
+from .keys import OperatorKey, load_signer
 from .mandate import NonceStore, verify_mandate
 from .models import Outcome, PaymentIntent
 from .sources import LocalFileSource
@@ -85,7 +85,12 @@ def build_enforcer(config: BouncerConfig) -> Enforcer:
     config.ensure_home()
     assert config.key_path is not None and config.db_path is not None
     assert config.policy_path is not None
-    key = OperatorKey.load_or_generate(config.key_path)
+    key = load_signer(
+        config.key_path,
+        command=config.signer_argv,
+        public_key_path=config.public_key_path,
+        create=True,
+    )
     audit = AuditLog(config.db_path, key)
     # All three share one engine, so they share one SQLite file and one write
     # lock — the CLI and the server stay consistent with each other.

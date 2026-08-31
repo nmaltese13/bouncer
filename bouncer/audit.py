@@ -41,7 +41,7 @@ from sqlalchemy.orm import Mapped, Session, mapped_column
 from .canonical import canonical_json, sha256_hex, utc_iso
 from .db import Base, SessionFactory, create_session_factory, make_engine
 from .errors import AuditError
-from .keys import OperatorKey, VerifyKey
+from .keys import Signer, VerifyKey
 from .models import Decision, Outcome, PaymentIntent, SpendRecord
 
 __all__ = [
@@ -166,7 +166,7 @@ class AuditLog:
     def __init__(
         self,
         db_path: str | Path,
-        key: OperatorKey,
+        key: Signer,
         *,
         engine: Engine | None = None,
     ) -> None:

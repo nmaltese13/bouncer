@@ -140,16 +140,48 @@ of the whole log reduces to the security of one file on one machine.
 
 Named so the gap is a decision rather than an oversight:
 
-| Approach | What it buys | Why not yet |
+| Approach | What it buys | Status |
 | --- | --- | --- |
-| **Hardware-backed key** (TPM, HSM, YubiKey) | The key cannot be copied off the host. An attacker with code execution can still *use* it as a signing oracle, but cannot walk away with the ability to forge history offline or after eviction. | Cheapest real improvement and the most likely next step. It needs a signing interface behind `OperatorKey`, which the class is already shaped for. |
+| **Hardware-backed key** (TPM, HSM, YubiKey) | The key cannot be copied off the host. An attacker with code execution can still *use* it as a signing oracle while they retain access, but cannot walk away with the ability to forge history offline or after eviction. | **Available** — see below. |
 | **Separate signing service** | The enforcer submits rows to a signer it cannot read the key from. Compromising the decision path no longer yields forging power. | Adds a second process and an IPC boundary to a tool whose whole premise is a single local process. Worth it only alongside a multi-host deployment. |
 | **Append to an external collector** | Rows leave the host as they are written, so a later local forgery contradicts a copy the attacker never controlled. | This is the tail-truncation fix as well, and it is the strongest option. It requires a network dependency in the decision path, which v1 deliberately does not have. |
 | **Transparency-log anchoring** | Third parties can detect a rewritten history. | Meaningful only with an external witness, which reduces to the option above. |
 
-None of these are hard to build. They are absent because v1 assumes a single
-trusted operator on a trusted machine, and adding them without that assumption
-changing would be security theatre.
+The remaining three are absent because v1 assumes a single trusted operator on a
+trusted machine, and adding them without that assumption changing would be
+security theatre.
+
+### Keeping the key out of this process
+
+The audit log and the mandate issuer depend on a `Signer` protocol — `key_id`,
+`verify_key`, `sign` — not on a key object. Point bouncer at a command and the
+private key never enters the process:
+
+```bash
+export BOUNCER_SIGNER_COMMAND="/usr/local/bin/sign-with-yubikey"
+export BOUNCER_PUBLIC_KEY="$HOME/.bouncer/operator.pub"
+bouncer serve
+```
+
+The command reads the message to sign on stdin and writes the detached Ed25519
+signature to stdout, as 64 raw bytes or as base64. That contract is small enough
+to wrap `pkcs11-tool`, a TPM helper, a hardware-token agent, or a signing
+service on a socket.
+
+Two properties worth knowing:
+
+- **The public key is required, not inferred.** bouncer needs it to attribute
+  audit rows and to check what comes back. Deriving it from the signer's first
+  response would mean trusting an unverified signature to establish the identity
+  every later signature is checked against.
+- **Every signature is verified before it is recorded.** A misconfigured signer
+  that emits garbage fails loudly on the first attempt rather than filling the
+  log with rows that will never verify — damage that would otherwise surface
+  only at the next `bouncer verify`, long after the evidence was needed.
+
+This narrows the blast radius; it does not eliminate it. An attacker with code
+execution on the host can still ask the signer to sign anything for as long as
+they keep that access. What they cannot do is take the key with them.
 
 ## Limits of the guarantee
 

@@ -24,7 +24,7 @@ from .approvals import ApprovalQueue, ApprovalStatus, PendingView, to_webhook_pa
 from .audit import AuditLog
 from .engine import evaluate, evaluate_tunnel
 from .errors import UnparseableIntent
-from .keys import OperatorKey
+from .keys import Signer
 from .mandate import DEFAULT_TTL, NonceStore, issue_mandate
 from .models import Decision, Outcome, PaymentIntent, ReasonCode
 from .sources import LoadedPolicy, PolicySource
@@ -67,7 +67,7 @@ class Enforcer:
         *,
         source: PolicySource,
         audit: AuditLog,
-        key: OperatorKey,
+        key: Signer,
         nonces: NonceStore,
         approvals: ApprovalQueue,
         mandate_ttl: timedelta = DEFAULT_TTL,

@@ -9,6 +9,7 @@ server to configure.
 from __future__ import annotations
 
 import os
+import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -31,6 +32,11 @@ class BouncerConfig:
     key_path: Path | None = None
     approval_timeout: float = DEFAULT_APPROVAL_TIMEOUT
     webhook_url: str | None = None
+    #: Command that signs on the operator's behalf. When set, the private
+    #: key never enters this process. See bouncer.keys.ExternalSigner.
+    signer_command: str | None = None
+    #: Public key matching the external signer, required alongside it.
+    public_key_path: Path | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "home", Path(self.home).expanduser())
@@ -58,6 +64,8 @@ class BouncerConfig:
             key_path=_optional_env_path("BOUNCER_KEY"),
             approval_timeout=timeout,
             webhook_url=os.environ.get("BOUNCER_WEBHOOK_URL") or None,
+            signer_command=os.environ.get("BOUNCER_SIGNER_COMMAND") or None,
+            public_key_path=_optional_env_path("BOUNCER_PUBLIC_KEY"),
         )
 
     def ensure_home(self) -> Path:
@@ -70,6 +78,11 @@ class BouncerConfig:
     def db_url(self) -> str:
         return f"sqlite+pysqlite:///{self.db_path}"
 
+    @property
+    def signer_argv(self) -> list[str] | None:
+        """The signer command split into argv, or None for an in-process key."""
+        return shlex.split(self.signer_command) if self.signer_command else None
+
 
 def _env_path(name: str, default: Path) -> Path:
     raw = os.environ.get(name)
@@ -79,3 +92,4 @@ def _env_path(name: str, default: Path) -> Path:
 def _optional_env_path(name: str) -> Path | None:
     raw = os.environ.get(name)
     return Path(raw).expanduser() if raw else None
+

@@ -20,10 +20,15 @@ only as far as the enclosing directory's ACL protects it.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import os
 import stat
+import subprocess
+from collections.abc import Sequence
 from pathlib import Path
+from typing import Protocol, runtime_checkable
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
@@ -34,7 +39,17 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 
 from .errors import BouncerError
 
-__all__ = ["KeyError_", "OperatorKey", "VerifyKey", "key_id_for"]
+#: Ed25519 detached signatures are a fixed width.
+_SIGNATURE_BYTES = 64
+
+__all__ = [
+    "ExternalSigner",
+    "KeyError_",
+    "OperatorKey",
+    "Signer",
+    "VerifyKey",
+    "key_id_for",
+]
 
 
 class KeyError_(BouncerError):
@@ -94,6 +109,139 @@ class VerifyKey:
         except InvalidSignature:
             return False
         return True
+
+
+@runtime_checkable
+class Signer(Protocol):
+    """Something that can sign on the operator's behalf.
+
+    The audit log and the mandate issuer depend on this, not on
+    :class:`OperatorKey`, so the private key does not have to live inside this
+    process. Three members are all the signing path ever needs.
+
+    Threat model: widening this seam does not by itself improve anything — an
+    in-process key remains the default. What it buys is that a signer backed by
+    a TPM, an HSM or a hardware token can be substituted without the audit or
+    mandate code changing, which turns the mitigation named in SECURITY.md from
+    a design note into something an operator can actually deploy.
+    """
+
+    @property
+    def key_id(self) -> str:
+        """Short fingerprint of the public half, recorded on every audit row."""
+        ...
+
+    @property
+    def verify_key(self) -> VerifyKey:
+        """The public half, for verification."""
+        ...
+
+    def sign(self, message: bytes) -> bytes:
+        """Produce a detached Ed25519 signature over ``message``."""
+        ...
+
+
+class ExternalSigner:
+    """Signs by invoking an external command; no private key in this process.
+
+    The command receives the message to sign on stdin and writes the detached
+    Ed25519 signature to stdout, either as 64 raw bytes or as base64. That is a
+    small enough contract for a shell wrapper around ``pkcs11-tool``, a YubiKey
+    agent, a TPM helper, or a signing service on a socket.
+
+    Threat model: this narrows what a compromise of *this* process yields. An
+    attacker with code execution can still ask the signer to sign whatever they
+    like while they retain access — it is a signing oracle, not a vault — but
+    they cannot copy the key out and forge history offline or after eviction.
+    Against the failure the audit log is most exposed to, that is the difference
+    between a permanent forgery capability and a temporary one.
+
+    Every signature is verified against the public key before it is returned. A
+    misconfigured or broken signer that emits garbage would otherwise write
+    unverifiable rows, and the damage would only surface at the next
+    ``bouncer verify`` — long after the evidence was needed.
+    """
+
+    def __init__(
+        self,
+        command: Sequence[str],
+        public_key: VerifyKey,
+        *,
+        timeout: float = 10.0,
+    ) -> None:
+        if not command:
+            raise KeyError_("external signer command must not be empty")
+        self._command = list(command)
+        self._public = public_key
+        self._timeout = timeout
+
+    @classmethod
+    def from_public_pem(
+        cls, command: Sequence[str], path: str | Path, *, timeout: float = 10.0
+    ) -> ExternalSigner:
+        """Build a signer that verifies against the public key at ``path``."""
+        return cls(command, VerifyKey.from_file(path), timeout=timeout)
+
+    @property
+    def key_id(self) -> str:
+        return self._public.key_id
+
+    @property
+    def verify_key(self) -> VerifyKey:
+        return self._public
+
+    def sign(self, message: bytes) -> bytes:
+        try:
+            completed = subprocess.run(  # noqa: S603 - the command is operator config
+                self._command,
+                input=message,
+                capture_output=True,
+                timeout=self._timeout,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise KeyError_(
+                f"external signer {self._command[0]!r} could not be run: {exc}"
+            ) from exc
+
+        if completed.returncode != 0:
+            detail = completed.stderr.decode("utf-8", errors="replace").strip()
+            raise KeyError_(
+                f"external signer exited {completed.returncode}: {detail[:200]}"
+            )
+
+        signature = _decode_signature(completed.stdout)
+        # Refusing here is the difference between one loud failure and a log
+        # full of rows that will never verify.
+        if not self._public.verify(signature, message):
+            raise KeyError_(
+                "external signer returned a signature that does not verify under "
+                f"key {self.key_id}; refusing to record it"
+            )
+        return signature
+
+
+def _decode_signature(raw: bytes) -> bytes:
+    """Accept a detached Ed25519 signature as raw bytes or base64.
+
+    Ed25519 signatures are always exactly 64 bytes, and base64 of 64 bytes is
+    never 64 bytes, so the two encodings cannot be confused for one another.
+    """
+    if len(raw) == _SIGNATURE_BYTES:
+        return raw
+    try:
+        decoded = base64.b64decode(raw.strip(), validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise KeyError_(
+            f"external signer produced {len(raw)} bytes, which is neither a raw "
+            "64-byte Ed25519 signature nor valid base64"
+        ) from exc
+    if len(decoded) != _SIGNATURE_BYTES:
+        raise KeyError_(
+            f"external signer produced a {len(decoded)}-byte signature; "
+            f"Ed25519 signatures are {_SIGNATURE_BYTES} bytes"
+        )
+    return decoded
 
 
 class OperatorKey:
@@ -198,3 +346,42 @@ class OperatorKey:
 
     def verify(self, signature: bytes, message: bytes) -> bool:
         return self.verify_key.verify(signature, message)
+
+
+def load_signer(
+    key_path: str | Path,
+    *,
+    command: Sequence[str] | None = None,
+    public_key_path: str | Path | None = None,
+    create: bool = False,
+) -> Signer:
+    """Build the signer an operator has configured.
+
+    Defaults to an in-process :class:`OperatorKey`, which is what a single
+    trusted operator on a trusted machine wants. Supplying ``command`` switches
+    to an :class:`ExternalSigner`, so the private key never enters this process
+    and cannot be copied out of it.
+
+    An external signer requires the matching public key: bouncer must be able to
+    verify what the signer hands back, and it needs the key id for the audit
+    rows. Refusing without one is deliberate -- inferring it from whatever the
+    signer first returns would mean trusting an unverified signature to
+    establish the identity every later signature is checked against.
+
+    Args:
+        create: Generate an operator key when none exists. Off by default,
+            because a missing key usually means the wrong home directory, and
+            silently minting a replacement would leave every previously signed
+            audit row unverifiable under the new one. Only first-run paths
+            pass True.
+    """
+    if command:
+        if public_key_path is None:
+            raise KeyError_(
+                "an external signer needs the matching public key; set the "
+                "public key path alongside the signer command"
+            )
+        return ExternalSigner.from_public_pem(command, public_key_path)
+    if create:
+        return OperatorKey.load_or_generate(key_path)
+    return OperatorKey.load(key_path)
