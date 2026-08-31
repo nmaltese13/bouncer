@@ -408,3 +408,72 @@ def test_resolve_rejects_unknown_fields(client: TestClient) -> None:
         json={"role": "finance", "aprove": True},
     )
     assert response.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# the body cap has to prevent the allocation, not just report it afterwards
+# ---------------------------------------------------------------------------
+
+
+def test_an_oversized_body_is_refused_without_being_buffered(
+    client: TestClient,
+) -> None:
+    """`await request.body()` read the whole payload before its length could be
+    checked, so the limit rejected the request but did not prevent the memory
+    being taken. A 24 MB post cost 24 MB.
+    """
+    import tracemalloc
+
+    oversize = b"x" * (8 * 1024 * 1024)
+    tracemalloc.start()
+    tracemalloc.reset_peak()
+    response = client.post(
+        "/authorize", content=oversize, headers={"content-type": "application/json"}
+    )
+    peak = tracemalloc.get_traced_memory()[1]
+    tracemalloc.stop()
+
+    assert response.status_code == 413
+    assert peak < len(oversize) // 4, (
+        f"peak was {peak} bytes for an {len(oversize)}-byte body; the cap is "
+        "rejecting after buffering rather than instead of it"
+    )
+
+
+def test_the_model_parsing_route_is_capped_too(client: TestClient) -> None:
+    """/authorize/raw never sees the raw body, so only middleware protects it."""
+    response = client.post(
+        "/authorize/raw",
+        content=b"x" * (2 * 1024 * 1024),
+        headers={"content-type": "application/json"},
+    )
+    assert response.status_code == 413
+
+
+def test_a_body_larger_than_it_claims_is_still_capped(client: TestClient) -> None:
+    """A truthful Content-Length is not something a caller has to supply."""
+    oversize = b"x" * (2 * 1024 * 1024)
+    response = client.post(
+        "/authorize",
+        content=oversize,
+        headers={"content-type": "application/json", "transfer-encoding": "chunked"},
+    )
+    assert response.status_code == 413
+
+
+def test_a_malformed_content_length_is_refused(client: TestClient) -> None:
+    response = client.post(
+        "/authorize",
+        content=b'{"agent_id":"research-bot"}',
+        headers={"content-type": "application/json", "content-length": "not-a-number"},
+    )
+    assert response.status_code in (400, 413)
+
+
+def test_a_normal_sized_body_still_works(client: TestClient) -> None:
+    """The cap must not break the ordinary path."""
+    status, body = authorize(
+        client, agent_id="research-bot", merchant="api.example.com", amount="12.00"
+    )
+    assert status == 200
+    assert body["mandate"]

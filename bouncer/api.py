@@ -44,7 +44,47 @@ _STATUS = {
 
 #: Cap on a single request body. An agent should not be able to exhaust memory
 #: by posting an enormous "intent".
+#:
+#: Enforced in two places, because one is not enough. The middleware refuses a
+#: declared ``Content-Length`` over the cap before any body is read, which
+#: covers every ordinary client and every route including the ones FastAPI
+#: parses into a model. The streaming read in ``/authorize`` then caps what is
+#: actually buffered, so a request that lies about its length — or sends none
+#: at all, as chunked encoding does — cannot force the allocation either.
 MAX_BODY_BYTES = 256 * 1024
+
+
+def _too_large() -> JSONResponse:
+    return JSONResponse(
+        status_code=413, content={"error": f"body exceeds {MAX_BODY_BYTES} bytes"}
+    )
+
+
+async def _read_capped(request: Request) -> bytes | None:
+    """Read the body, or return None if it exceeds the cap.
+
+    Threat model: ``await request.body()`` buffers the whole payload before its
+    length can be checked, so a limit applied afterwards rejects the request but
+    does not prevent the allocation — a 24 MB body cost 24 MB of memory before
+    being refused. Reading incrementally and stopping at the cap is what makes
+    the limit a protection rather than an after-the-fact complaint.
+    """
+    declared = request.headers.get("content-length")
+    if declared is not None:
+        try:
+            if int(declared) > MAX_BODY_BYTES:
+                return None
+        except ValueError:
+            return None
+
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > MAX_BODY_BYTES:
+            return None
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 class RawTraffic(BaseModel):
@@ -128,6 +168,24 @@ def create_app(config: BouncerConfig | None = None, *, enforcer: Enforcer | None
     app.state.enforcer = engine
     app.state.config = resolved
 
+    @app.middleware("http")
+    async def cap_request_size(request: Request, call_next: Any) -> Response:
+        """Refuse an over-large body before any of it is read.
+
+        Routes that FastAPI parses into a model never see the raw body, so they
+        cannot cap it themselves; this is the only place that protects them.
+        """
+        declared = request.headers.get("content-length")
+        if declared is not None:
+            try:
+                oversized = int(declared) > MAX_BODY_BYTES
+            except ValueError:
+                oversized = True
+            if oversized:
+                return _too_large()
+        response: Response = await call_next(request)
+        return response
+
     @app.get("/healthz")
     def healthz() -> dict[str, Any]:
         loaded = engine.source.load()
@@ -164,12 +222,9 @@ def create_app(config: BouncerConfig | None = None, *, enforcer: Enforcer | None
         timeout: float | None = Query(None, gt=0, le=3600),
     ) -> Response:
         """Authorize a payment intent supplied as a JSON body."""
-        body = await request.body()
-        if len(body) > MAX_BODY_BYTES:
-            return JSONResponse(
-                status_code=413,
-                content={"error": f"body exceeds {MAX_BODY_BYTES} bytes"},
-            )
+        body = await _read_capped(request)
+        if body is None:
+            return _too_large()
 
         ctx = RequestContext(
             method="POST",
