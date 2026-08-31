@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from decimal import Decimal
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -59,6 +60,13 @@ _HOP_BY_HOP = frozenset(
         "upgrade",
     }
 )
+
+#: Any control character is unforwardable: written back out between CRLF
+#: separators, a bare CR or LF becomes a header boundary at the upstream.
+_CONTROL_CHARS = re.compile("[\x00-\x1f\x7f]")
+
+#: RFC 9110 token, which is what a method and a header name must be.
+_TOKEN = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
 
 #: Header an agent uses to identify itself. Unauthenticated by design — see the
 #: module threat model.
@@ -113,6 +121,23 @@ async def _read_headers(reader: asyncio.StreamReader) -> bytes:
 
 
 def _parse_request_head(raw: bytes) -> tuple[str, str, str, list[tuple[str, str]]]:
+    """Parse the request line and headers, rejecting anything unforwardable.
+
+    Threat model: an authorized request is rebuilt and written upstream by
+    concatenating these values with CRLF separators. Splitting the client's
+    input on ``\\r\\n`` alone leaves a *bare* ``\\n`` intact inside a header
+    value, and an upstream that accepts LF-terminated headers — many do — would
+    then read everything after it as a header of its own. An agent could inject
+    into a request bouncer had already approved, up to and including a competing
+    ``X-Bouncer-Mandate``, so the audit row would no longer describe what
+    actually left the machine.
+
+    Every control character is therefore refused here rather than sanitized.
+    Stripping them would silently forward a request the client did not send;
+    refusing is the only behaviour that keeps the logged decision and the
+    forwarded bytes the same thing. RFC 9110 forbids them in field values
+    anyway.
+    """
     text = raw.decode("iso-8859-1")
     lines = text.split("\r\n")
     request_line = lines[0]
@@ -121,6 +146,11 @@ def _parse_request_head(raw: bytes) -> tuple[str, str, str, list[tuple[str, str]
         raise ProxyError(f"malformed request line: {request_line!r}")
     method, target, version = parts
 
+    if _CONTROL_CHARS.search(request_line):
+        raise ProxyError("control character in the request line")
+    if not _TOKEN.fullmatch(method):
+        raise ProxyError(f"malformed method: {method!r}")
+
     headers: list[tuple[str, str]] = []
     for line in lines[1:]:
         if not line:
@@ -128,7 +158,12 @@ def _parse_request_head(raw: bytes) -> tuple[str, str, str, list[tuple[str, str]
         name, separator, value = line.partition(":")
         if not separator:
             raise ProxyError(f"malformed header line: {line!r}")
-        headers.append((name.strip(), value.strip()))
+        name, value = name.strip(), value.strip()
+        if not _TOKEN.fullmatch(name):
+            raise ProxyError(f"malformed header name: {name!r}")
+        if _CONTROL_CHARS.search(value):
+            raise ProxyError(f"control character in the value of header {name!r}")
+        headers.append((name, value))
     return method.upper(), target, version, headers
 
 
