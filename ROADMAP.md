@@ -59,9 +59,6 @@ but it is a ceiling, and a per-agent lock would lift it if it ever mattered.
   live keys today, on purpose.
 - **Richer categories.** Merchant category codes (MCC) rather than free-text
   categories, so policies can be written against a standard vocabulary.
-- **Per-merchant sub-limits.** `merchants.allow` currently grants access up to
-  the agent's global cap. Per-merchant ceilings would let one agent hold a large
-  budget that is only spendable in small amounts at any single vendor.
 - **Spend forecasting in `bouncer pending`.** Showing an approver how much
   budget remains in the window would make the approve/deny call better informed.
 - **Slack and Teams integrations**, built on the existing webhook rather than

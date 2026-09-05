@@ -172,6 +172,7 @@ def replay(
                     amount=intent.amount,
                     currency=intent.currency,
                     timestamp=moment,
+                    merchant=intent.merchant,
                 )
             )
         attempts.append(

@@ -136,8 +136,41 @@ class RollingWindow(_Strict):
         return parse_duration(self.window)
 
 
+class MerchantLimit(_Strict):
+    """A ceiling that applies at one merchant rather than across the agent.
+
+    Threat model: these only ever *tighten*. A merchant limit is checked in
+    addition to the agent's own cap and windows, never instead of them, so
+    writing a per-merchant cap above the agent cap cannot raise what the agent
+    may spend. Letting a nested rule widen an outer one would make the effective
+    policy depend on reading two places at once, which is how a policy comes to
+    permit something nobody intended.
+    """
+
+    per_transaction_cap: Money | None = None
+    rolling_windows: list[RollingWindow] = Field(default_factory=list)
+
+    _coerce_cap = field_validator("per_transaction_cap", mode="before")(_to_decimal)
+
+    @model_validator(mode="after")
+    def _must_restrict_something(self) -> Self:
+        if self.per_transaction_cap is None and not self.rolling_windows:
+            raise ValueError(
+                "a merchant limit must set per_transaction_cap or at least one "
+                "rolling window; an empty one restricts nothing and reads as if "
+                "it does"
+            )
+        return self
+
+    @property
+    def longest_window(self) -> timedelta | None:
+        if not self.rolling_windows:
+            return None
+        return max(window.duration for window in self.rolling_windows)
+
+
 class MerchantRules(_Strict):
-    """Merchant allowlist and denylist.
+    """Merchant allowlist, denylist, and per-merchant ceilings.
 
     Patterns are shell-style globs matched case-insensitively, so
     ``*.example.com`` covers subdomains. ``deny`` always beats ``allow``.
@@ -146,10 +179,14 @@ class MerchantRules(_Strict):
     on the denylist passes the merchant check. If ``allow`` is present, a
     merchant must match it. An empty list therefore means "no merchant is
     permitted", which is a usable way to freeze an agent.
+
+    ``limits`` scopes a ceiling to one vendor: an agent may hold a large budget
+    that is only spendable in small amounts anywhere in particular.
     """
 
     allow: list[str] | None = None
     deny: list[str] = Field(default_factory=list)
+    limits: dict[str, MerchantLimit] = Field(default_factory=dict)
 
     @field_validator("allow", "deny")
     @classmethod
@@ -158,6 +195,33 @@ class MerchantRules(_Strict):
             return None
         return [item.strip().lower().rstrip(".") for item in value]
 
+    @field_validator("limits")
+    @classmethod
+    def _normalize_limits(
+        cls, value: dict[str, MerchantLimit]
+    ) -> dict[str, MerchantLimit]:
+        """Normalize limit patterns, refusing two that collide once normalized.
+
+        Same reasoning as agent keys: ``API.Example.com`` and
+        ``api.example.com`` are one pattern, and silently keeping whichever came
+        last would enforce a limit the operator did not choose.
+        """
+        out: dict[str, MerchantLimit] = {}
+        seen: dict[str, str] = {}
+        for key, limit in value.items():
+            pattern = key.strip().lower().rstrip(".")
+            if not pattern:
+                raise ValueError("a merchant limit pattern must not be blank")
+            if pattern in seen:
+                raise ValueError(
+                    f"merchant limits {seen[pattern]!r} and {key!r} normalize to "
+                    f"the same pattern {pattern!r}; one would silently override "
+                    "the other"
+                )
+            seen[pattern] = key
+            out[pattern] = limit
+        return out
+
     def denied_by(self, merchant: str) -> str | None:
         """Return the denylist pattern matching ``merchant``, if any."""
         return _first_match(merchant, self.deny)
@@ -165,6 +229,27 @@ class MerchantRules(_Strict):
     def allowed_by(self, merchant: str) -> str | None:
         """Return the allowlist pattern matching ``merchant``, if any."""
         return _first_match(merchant, self.allow or [])
+
+    def limit_for(self, merchant: str) -> tuple[str, MerchantLimit] | None:
+        """The first limit whose pattern matches ``merchant``.
+
+        First match wins, in declaration order, so an operator can put a
+        specific host above a wildcard and have it take effect.
+        """
+        for pattern, limit in self.limits.items():
+            if fnmatch.fnmatchcase(merchant, pattern):
+                return pattern, limit
+        return None
+
+    @property
+    def longest_limit_window(self) -> timedelta | None:
+        """The longest window across every per-merchant limit."""
+        windows = [
+            limit.longest_window
+            for limit in self.limits.values()
+            if limit.longest_window is not None
+        ]
+        return max(windows) if windows else None
 
 
 class CategoryRules(_Strict):
@@ -271,14 +356,22 @@ class RuleSet(_Strict):
 
     @property
     def longest_window(self) -> timedelta | None:
-        """The longest rolling window declared, or None if there are none.
+        """The longest rolling window anywhere in this rule set.
 
         Callers use this to decide how far back spend history must reach. A
         horizon shorter than this would under-count spend and fail open.
+
+        Per-merchant windows are included deliberately. A merchant limit of
+        ``500.00 per 90d`` under an agent whose own longest window is ``30d``
+        would otherwise be judged against 30 days of history and let the agent
+        spend several times its ceiling at that vendor — the exact failure this
+        property exists to prevent, reintroduced one level down.
         """
-        if not self.rolling_windows:
-            return None
-        return max(window.duration for window in self.rolling_windows)
+        durations = [window.duration for window in self.rolling_windows]
+        merchant_longest = self.merchants.longest_limit_window
+        if merchant_longest is not None:
+            durations.append(merchant_longest)
+        return max(durations) if durations else None
 
     @model_validator(mode="after")
     def _check_threshold_below_cap(self) -> Self:

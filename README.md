@@ -322,6 +322,26 @@ agents:
       approver_role: finance
 ```
 
+Ceilings can be scoped to one vendor, so an agent may hold a large budget that
+is only spendable in small amounts anywhere in particular:
+
+```yaml
+    merchants:
+      allow: ["api.openai.com", "*.vendor.example"]
+      limits:
+        api.openai.com:
+          per_transaction_cap: 50.00      # never more than $50 here,
+        "*.vendor.example":               # even though the agent cap is higher
+          rolling_windows:
+            - amount: 100.00              # one shared budget across every
+              window: 30d                 # subdomain the pattern covers
+```
+
+A merchant limit is checked **in addition** to the agent's own cap and windows,
+never instead of them, so writing one above the agent's cap cannot raise what
+the agent may spend. First matching pattern wins, so a specific host placed
+above a wildcard takes effect.
+
 The choices behind the schema, all of which fail closed:
 
 | Rule | Behavior |
@@ -332,6 +352,7 @@ The choices behind the schema, all of which fail closed:
 | Denylist vs allowlist | Denylist always wins. |
 | Missing allowlist | Not a constraint; any merchant not denied passes. |
 | Empty allowlist (`[]`) | Nothing passes. A usable way to freeze an agent. |
+| Per-merchant limit | Applies *in addition* to the agent's own. It can only tighten. |
 | Uncategorized request | Denied whenever `categories.allow` is set. |
 | Currency mismatch | Denied. bouncer never converts — that needs a live rate. |
 | Amounts in YAML | Parsed as decimals, never binary floats. `100.10` is exact. |

@@ -31,11 +31,12 @@ def intent(**overrides: Any) -> PaymentIntent:
 
 
 def spend(amount: str, *, days_ago: float = 1.0, agent_id: str = "research-bot",
-          currency: str = "USD") -> SpendRecord:
+          currency: str = "USD", merchant: str = "api.example.com") -> SpendRecord:
     return SpendRecord(
         agent_id=agent_id,
         amount=Decimal(amount),
         currency=currency,
+        merchant=merchant,
         timestamp=NOW - timedelta(days=days_ago),
     )
 

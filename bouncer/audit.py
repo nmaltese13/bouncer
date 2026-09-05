@@ -303,6 +303,7 @@ class AuditLog:
                 agent_id=row.agent_id,
                 amount=Decimal(row.amount),
                 currency=row.currency,
+                merchant=row.merchant,
                 timestamp=datetime.strptime(row.ts, "%Y-%m-%dT%H:%M:%S.%fZ").replace(
                     tzinfo=timezone.utc
                 ),

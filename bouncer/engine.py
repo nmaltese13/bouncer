@@ -24,6 +24,7 @@ override it.
 
 from __future__ import annotations
 
+import fnmatch
 from collections.abc import Iterable, Sequence
 from datetime import datetime
 from decimal import Decimal
@@ -63,6 +64,7 @@ def window_spend(
     currency: str,
     since: datetime,
     until: datetime,
+    merchant_pattern: str | None = None,
 ) -> Decimal:
     """Total committed spend for one agent in the half-open interval.
 
@@ -70,10 +72,21 @@ def window_spend(
     has aged out. Records for other agents or other currencies are ignored;
     bouncer never converts between currencies, because doing so would require a
     live rate and make the decision non-deterministic.
+
+    Args:
+        merchant_pattern: Restrict the total to merchants matching this glob,
+            for a ceiling scoped to one vendor. The pattern is matched against
+            the record's own merchant, so a limit written as ``*.vendor.example``
+            accumulates across every subdomain it covers rather than treating
+            each as a separate budget.
     """
     total = Decimal(0)
     for record in history:
         if record.agent_id != agent_id or record.currency != currency:
+            continue
+        if merchant_pattern is not None and not fnmatch.fnmatchcase(
+            record.merchant, merchant_pattern
+        ):
             continue
         if since < record.timestamp <= until:
             total += record.amount
@@ -205,6 +218,52 @@ def evaluate(
                 now=now,
                 rule=f"{scope}.rolling_windows[{index}]",
             )
+
+    # --- 5b. per-merchant ceilings ---------------------------------------
+    #
+    # Checked *after* the agent's own limits and never instead of them, so a
+    # merchant limit can only tighten. A per-merchant cap written above the
+    # agent cap changes nothing: the agent cap has already been applied and the
+    # request would not have reached here. Letting a nested rule widen an outer
+    # one would make the effective policy depend on reading two places at once.
+    merchant_limit = rules.merchants.limit_for(request.merchant)
+    if merchant_limit is not None:
+        pattern, limit = merchant_limit
+        limit_scope = f"{scope}.merchants.limits[{pattern!r}]"
+
+        if limit.per_transaction_cap is not None and request.amount > limit.per_transaction_cap:
+            return _decide(
+                Outcome.DENY,
+                ReasonCode.OVER_MERCHANT_CAP,
+                f"{request.amount} {request.currency} exceeds the "
+                f"{limit.per_transaction_cap} per-transaction cap for merchants "
+                f"matching {pattern!r}",
+                policy_hash=policy_hash,
+                now=now,
+                rule=f"{limit_scope}.per_transaction_cap",
+            )
+
+        for index, window in enumerate(limit.rolling_windows):
+            spent = window_spend(
+                spend_history,
+                agent_id=request.agent_id,
+                currency=resolved.currency,
+                since=now - window.duration,
+                until=now,
+                merchant_pattern=pattern,
+            )
+            if spent + request.amount > window.amount:
+                return _decide(
+                    Outcome.DENY,
+                    ReasonCode.OVER_MERCHANT_WINDOW,
+                    f"{request.amount} {request.currency} would bring spend at "
+                    f"merchants matching {pattern!r} over the last "
+                    f"{window.window} to {spent + request.amount}, above the "
+                    f"{window.amount} ceiling (already spent {spent})",
+                    policy_hash=policy_hash,
+                    now=now,
+                    rule=f"{limit_scope}.rolling_windows[{index}]",
+                )
 
     # --- 6. human in the loop --------------------------------------------
     approval = rules.approval_required_above

@@ -208,6 +208,16 @@ def cmd_policy(args: argparse.Namespace, out: TextIO) -> int:
             out.write(f"  merchants allowed: {', '.join(rules.merchants.allow) or '(none)'}\n")
         if rules.merchants.deny:
             out.write(f"  merchants denied: {', '.join(rules.merchants.deny)}\n")
+        # Printed because this command exists to show what will be enforced.
+        # Omitting a ceiling would read as though none was set.
+        for pattern, limit in rules.merchants.limits.items():
+            out.write(f"  at merchants matching {pattern!r}:\n")
+            if limit.per_transaction_cap is not None:
+                out.write(f"    per-transaction cap: {limit.per_transaction_cap}\n")
+            for rolling in limit.rolling_windows:
+                out.write(
+                    f"    rolling ceiling: {rolling.amount} per {rolling.window}\n"
+                )
         for schedule in rules.time_windows:
             days = ",".join(d.value for d in schedule.days) if schedule.days else "all days"
             out.write(

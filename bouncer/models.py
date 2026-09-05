@@ -91,6 +91,8 @@ class ReasonCode(str, Enum):
     OUTSIDE_TIME_WINDOW = "OUTSIDE_TIME_WINDOW"
     OVER_PER_TXN_CAP = "OVER_PER_TXN_CAP"
     OVER_ROLLING_WINDOW = "OVER_ROLLING_WINDOW"
+    OVER_MERCHANT_CAP = "OVER_MERCHANT_CAP"
+    OVER_MERCHANT_WINDOW = "OVER_MERCHANT_WINDOW"
     TUNNEL_NOT_PERMITTED = "TUNNEL_NOT_PERMITTED"
 
     # --- approval lifecycle ----------------------------------------------
@@ -179,7 +181,13 @@ class Decision(BaseModel):
 
 
 class SpendRecord(BaseModel):
-    """One historical committed spend, used to evaluate rolling windows."""
+    """One historical committed spend, used to evaluate rolling windows.
+
+    ``merchant`` is carried because ceilings can be scoped to one vendor, not
+    only to the agent as a whole. It is normalized the same way
+    :attr:`PaymentIntent.merchant` is, so a per-merchant total cannot be split
+    across ``API.Example.com`` and ``api.example.com``.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -187,5 +195,11 @@ class SpendRecord(BaseModel):
     amount: Money
     currency: str
     timestamp: datetime
+    merchant: str = ""
 
     _coerce_amount = field_validator("amount", mode="before")(_to_decimal)
+
+    @field_validator("merchant")
+    @classmethod
+    def _normalize_merchant(cls, value: str) -> str:
+        return value.strip().lower().rstrip(".")
